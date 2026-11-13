@@ -172,6 +172,21 @@ function ensureSchema(PDO $pdo): void
     if (!in_array('authority_by', $visitorCols, true)) {
         $pdo->exec("ALTER TABLE visitors ADD COLUMN authority_by VARCHAR(120) NOT NULL DEFAULT '' AFTER remarks");
     }
+
+    // 4. Inter-Camp Movements & Temporary Accommodation Migration
+    $tables = $pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+    if (!in_array('inter_camp_movements', $tables, true)) {
+        $migrationFile = __DIR__ . '/migrations/001_inter_camp_movements_schema.sql';
+        if (is_file($migrationFile)) {
+            $sql = file_get_contents($migrationFile);
+            $statements = array_filter(array_map('trim', explode(';', $sql)));
+            foreach ($statements as $stmt) {
+                if (!empty($stmt)) {
+                    $pdo->exec($stmt);
+                }
+            }
+        }
+    }
 }
 
 /**

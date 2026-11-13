@@ -178,6 +178,35 @@ function require_admin(bool $json = true): void
     }
 }
 
+/**
+ * Check if the active user has access to a specific camp code.
+ * Admins have access to all camps; other roles are scoped to their assigned camp.
+ */
+function has_camp_access(string $campCode): bool
+{
+    if (($_SESSION['role'] ?? 'user') === 'admin') {
+        return true;
+    }
+    return strtoupper(trim($_SESSION['location'] ?? '')) === strtoupper(trim($campCode));
+}
+
+/**
+ * Enforce camp access guard.
+ */
+function require_camp_access(string $campCode, bool $json = true): void
+{
+    if (!has_camp_access($campCode)) {
+        http_response_code(403);
+        if ($json) {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'message' => 'Access denied: You are not authorized for camp ' . htmlspecialchars($campCode) . '.']);
+        } else {
+            echo 'Access denied for camp ' . htmlspecialchars($campCode) . '.';
+        }
+        exit;
+    }
+}
+
 // ── 7. Allowed POST actions whitelist ────────────────────────
 define('ALLOWED_ACTIONS', [
     'add_visitor',
@@ -190,6 +219,15 @@ define('ALLOWED_ACTIONS', [
     'edit_location',
     'toggle_location',
     'delete_location',
+    // Inter-Camp Movement actions
+    'lookup_personnel',
+    'register_origin_out',
+    'confirm_destination_in',
+    'register_destination_out',
+    'confirm_origin_return_in',
+    'extend_accommodation',
+    'get_movement_history',
+    'cancel_movement',
 ]);
 
 /**

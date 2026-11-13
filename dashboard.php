@@ -9,6 +9,7 @@ require_once __DIR__ . '/security.php';
 require_auth();
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/movement_service.php';
 $pdo = getPDO();
 
 // 4. Logout (handle early)
@@ -40,7 +41,10 @@ $_SESSION['role']      = $me['role'];
 $_SESSION['location']  = strtoupper($me['location']);
 $_SESSION['full_name'] = trim(($me['rank'] ? $me['rank'] . ' ' : '') . ($me['name'] ?: $me['username']));
 
-$isAdmin         = ($me['role'] === 'admin');
+$userRole        = $me['role'];
+$isAdmin         = ($userRole === 'admin');
+$isProvost       = ($userRole === 'oc_provost' || $isAdmin);
+$isCampAdmin     = ($userRole === 'camp_admin' || $isAdmin);
 $currentLocation = $_SESSION['location'];
 
 // ── POST handlers (AJAX-friendly JSON responses) ─────────────
@@ -476,6 +480,112 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'delet
     exit;
 }
 
+// ── Inter-Camp Movement & Accommodation POST Handlers ─────────
+
+// 11. Lookup personnel by SVS number
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'lookup_personnel') {
+    csrf_verify(true);
+    header('Content-Type: application/json');
+    $svsNo = post_str('svs_no', 40);
+    $person = lookupPersonnel($pdo, $svsNo);
+    echo json_encode(['success' => true, 'personnel' => $person]);
+    exit;
+}
+
+// 12. Register Origin OUT (Stage A)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'register_origin_out') {
+    csrf_verify(true);
+    header('Content-Type: application/json');
+    try {
+        $result = registerOriginOut($pdo, $_POST, (int)$_SESSION['user_id'], $currentLocation, $isAdmin);
+        echo json_encode(['success' => true, 'message' => "Movement {$result['movement_ref']} registered. Serviceman dispatched.", 'data' => $result]);
+    } catch (Exception $e) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// 13. Confirm Destination IN (Stage B)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'confirm_destination_in') {
+    csrf_verify(true);
+    header('Content-Type: application/json');
+    try {
+        $movementId = post_int('movement_id');
+        $remarks    = post_str('remarks', 500);
+        $billet     = post_str('billet', 120);
+        $result = confirmDestinationIn($pdo, $movementId, (int)$_SESSION['user_id'], $currentLocation, $isAdmin, $remarks, $billet);
+        echo json_encode(['success' => true, 'message' => "Serviceman checked IN at destination. 24h temporary accommodation activated.", 'data' => $result]);
+    } catch (Exception $e) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// 14. Register Destination OUT (Stage D)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'register_destination_out') {
+    csrf_verify(true);
+    header('Content-Type: application/json');
+    try {
+        $movementId = post_int('movement_id');
+        $remarks    = post_str('remarks', 500);
+        $result = registerDestinationOut($pdo, $movementId, (int)$_SESSION['user_id'], $currentLocation, $isAdmin, $remarks);
+        echo json_encode(['success' => true, 'message' => "Serviceman checked OUT from destination camp. Returning to home base.", 'data' => $result]);
+    } catch (Exception $e) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// 15. Confirm Origin Return IN (Stage E)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'confirm_origin_return_in') {
+    csrf_verify(true);
+    header('Content-Type: application/json');
+    try {
+        $movementId = post_int('movement_id');
+        $remarks    = post_str('remarks', 500);
+        $result = confirmOriginReturnIn($pdo, $movementId, (int)$_SESSION['user_id'], $currentLocation, $isAdmin, $remarks);
+        echo json_encode(['success' => true, 'message' => "Serviceman returned to parent base. Movement lifecycle COMPLETED.", 'data' => $result]);
+    } catch (Exception $e) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// 16. Extend Temporary Accommodation Validity
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'extend_accommodation') {
+    csrf_verify(true);
+    header('Content-Type: application/json');
+    try {
+        $accomId   = post_int('accommodation_id');
+        $hours     = post_int('additional_hours');
+        $reason    = post_str('reason', 500);
+        $authName  = post_str('authorized_by_name', 120);
+        $authSvs   = post_str('authorized_by_svs', 40);
+        $authRank  = post_str('authorized_by_rank', 60);
+
+        $result = extendAccommodation($pdo, $accomId, (int)$_SESSION['user_id'], $currentLocation, $isAdmin, $hours, $reason, $authName, $authSvs, $authRank);
+        echo json_encode(['success' => true, 'message' => "Accommodation extended until {$result['new_expiry']}.", 'data' => $result]);
+    } catch (Exception $e) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// 17. Fetch Movement Chronological Event History
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'get_movement_history') {
+    csrf_verify(true);
+    header('Content-Type: application/json');
+    $movId = post_int('movement_id');
+    $history = fetchMovementHistory($pdo, $movId);
+    echo json_encode(['success' => true, 'history' => $history]);
+    exit;
+}
+
 // ── Fetch visitors (Admin: all camps or selected camp; User: active camp ONLY) ──
 $search    = trim($_GET['q'] ?? '');
 $status    = $_GET['status'] ?? 'all';   // all | in | out
@@ -558,6 +668,49 @@ if (($_GET['ajax'] ?? '') === 'visitors') {
         ],
         'loc_filter'   => $locFilter,
         'refreshed_at' => date('d M Y, H:i:s'),
+    ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+    exit;
+}
+
+// Live JSON sync endpoint for movements
+if (($_GET['ajax'] ?? '') === 'movements') {
+    header('Content-Type: application/json');
+    refreshAccommodationStatuses($pdo);
+    $movList = fetchMovementsList($pdo, $isAdmin, $currentLocation, $_GET);
+    $pending = fetchPendingArrivalsList($pdo, $isAdmin, $currentLocation);
+    $mCounts = fetchMovementCounts($pdo, $isAdmin, $currentLocation);
+    echo json_encode([
+        'success'          => true,
+        'movements'        => $movList,
+        'pending_arrivals' => $pending,
+        'counts'           => $mCounts,
+        'refreshed_at'     => date('d M Y, H:i:s'),
+    ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+    exit;
+}
+
+// Live JSON sync endpoint for accommodations
+if (($_GET['ajax'] ?? '') === 'accommodations') {
+    header('Content-Type: application/json');
+    refreshAccommodationStatuses($pdo);
+    $accomList = fetchAccommodationsList($pdo, $isAdmin, $currentLocation, $_GET);
+    $mCounts   = fetchMovementCounts($pdo, $isAdmin, $currentLocation);
+    echo json_encode([
+        'success'        => true,
+        'accommodations' => $accomList,
+        'counts'         => $mCounts,
+        'refreshed_at'   => date('d M Y, H:i:s'),
+    ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+    exit;
+}
+
+// JSON endpoint for audit logs
+if (($_GET['ajax'] ?? '') === 'audit_logs') {
+    header('Content-Type: application/json');
+    $auditLogs = fetchAuditLogsList($pdo, $isAdmin, $currentLocation, $_GET);
+    echo json_encode([
+        'success'    => true,
+        'audit_logs' => $auditLogs,
     ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
     exit;
 }
@@ -742,6 +895,14 @@ $allUsers        = [];
 if ($isAdmin) {
     $allUsers = $pdo->query("SELECT id, username, svs_no, `rank`, name, role, location, is_active, created_at FROM users ORDER BY (role = 'admin') DESC, username ASC")->fetchAll();
 }
+
+// Initial movement & accommodation SSR states
+refreshAccommodationStatuses($pdo);
+$initialMovements       = fetchMovementsList($pdo, $isAdmin, $currentLocation, []);
+$initialPendingArrivals = fetchPendingArrivalsList($pdo, $isAdmin, $currentLocation);
+$initialAccommodations  = fetchAccommodationsList($pdo, $isAdmin, $currentLocation, []);
+$initialMovementCounts  = fetchMovementCounts($pdo, $isAdmin, $currentLocation);
+$initialAuditLogs       = ($isAdmin || $isProvost) ? fetchAuditLogsList($pdo, $isAdmin, $currentLocation, []) : [];
 ?>
 <!DOCTYPE html>
 <html lang="en" class="h-full"
@@ -1169,6 +1330,70 @@ if ($isAdmin) {
               x-text="counts.total"></span>
       </button>
 
+      <!-- Inter-Camp Movements -->
+      <button @click="activeTab = 'movements'; sidebarOpen = false; fetchMovements(true)"
+              title="Inter-Camp Movements"
+              :class="[
+                activeTab === 'movements'
+                  ? 'bg-blue-50 dark:bg-blue-900/40 text-blue-700 dark:text-blue-200 border-blue-200 dark:border-blue-700/50'
+                  : 'text-black dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-blue-900/20 border-transparent',
+                sidebarCollapsed ? 'lg:justify-center lg:px-2' : 'justify-between px-3'
+              ]"
+              class="w-full flex items-center py-2.5 rounded-xl text-sm font-semibold border transition-colors">
+        <span class="flex items-center gap-2.5">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/>
+          </svg>
+          <span :class="sidebarCollapsed ? 'lg:hidden' : ''">Inter-Camp Movements</span>
+        </span>
+        <span :class="sidebarCollapsed ? 'lg:hidden' : ''"
+              class="px-2 py-0.5 rounded-full text-xs bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 font-bold"
+              x-text="movementCounts.total_active || 0"></span>
+      </button>
+
+      <!-- Temporary Accommodation -->
+      <button @click="activeTab = 'accommodation'; sidebarOpen = false; fetchAccommodations(true)"
+              title="Temporary Accommodation"
+              :class="[
+                activeTab === 'accommodation'
+                  ? 'bg-blue-50 dark:bg-blue-900/40 text-blue-700 dark:text-blue-200 border-blue-200 dark:border-blue-700/50'
+                  : 'text-black dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-blue-900/20 border-transparent',
+                sidebarCollapsed ? 'lg:justify-center lg:px-2' : 'justify-between px-3'
+              ]"
+              class="w-full flex items-center py-2.5 rounded-xl text-sm font-semibold border transition-colors">
+        <span class="flex items-center gap-2.5">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+          </svg>
+          <span :class="sidebarCollapsed ? 'lg:hidden' : ''">Accommodation</span>
+        </span>
+        <span :class="sidebarCollapsed ? 'lg:hidden' : ''"
+              class="px-2 py-0.5 rounded-full text-xs"
+              :class="(movementCounts.expired > 0 || movementCounts.expiring_soon > 0) ? 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 font-bold animate-pulse' : 'bg-slate-200/80 dark:bg-blue-950 text-black dark:text-blue-300 font-bold'"
+              x-text="movementCounts.accommodated || 0"></span>
+      </button>
+
+      <!-- Personnel & Movement Inquiry -->
+      <button @click="activeTab = 'inquiry'; sidebarOpen = false"
+              title="Personnel Inquiry"
+              :class="[
+                activeTab === 'inquiry'
+                  ? 'bg-blue-50 dark:bg-blue-900/40 text-blue-700 dark:text-blue-200 border-blue-200 dark:border-blue-700/50'
+                  : 'text-black dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-blue-900/20 border-transparent',
+                sidebarCollapsed ? 'lg:justify-center lg:px-2' : 'justify-between px-3'
+              ]"
+              class="w-full flex items-center py-2.5 rounded-xl text-sm font-semibold border transition-colors">
+        <span class="flex items-center gap-2.5">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          <span :class="sidebarCollapsed ? 'lg:hidden' : ''">Personnel Inquiry</span>
+        </span>
+      </button>
+
       <button @click="activeTab = 'reports'; sidebarOpen = false; fetchReport(true)"
               title="Report Summary"
               :class="[
@@ -1232,6 +1457,24 @@ if ($isAdmin) {
         <span :class="sidebarCollapsed ? 'lg:hidden' : ''"
               class="px-2 py-0.5 rounded-full text-xs bg-slate-200/80 dark:bg-blue-950 text-black dark:text-blue-300 font-bold"
               x-text="locations.length"></span>
+      </button>
+
+      <button @click="activeTab = 'audit'; sidebarOpen = false; fetchAuditLogs(true)"
+              title="Audit Logs"
+              :class="[
+                activeTab === 'audit'
+                  ? 'bg-blue-50 dark:bg-blue-900/40 text-blue-700 dark:text-blue-200 border-blue-200 dark:border-blue-700/50'
+                  : 'text-black dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-blue-900/20 border-transparent',
+                sidebarCollapsed ? 'lg:justify-center lg:px-2' : 'justify-between px-3'
+              ]"
+              class="w-full flex items-center py-2.5 rounded-xl text-sm font-semibold border transition-colors">
+        <span class="flex items-center gap-2.5">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+          <span :class="sidebarCollapsed ? 'lg:hidden' : ''">Audit Trail</span>
+        </span>
       </button>
       <?php endif; ?>
     </nav>
@@ -1620,6 +1863,624 @@ if ($isAdmin) {
     </div>
   </div>
   </div><!-- /activeTab === 'visitors' -->
+
+  <!-- ── TAB: INTER-CAMP MOVEMENTS ── -->
+  <div x-show="activeTab === 'movements'" x-cloak>
+    <!-- Page title -->
+    <div class="mb-8 flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <h2 class="text-2xl font-black text-black dark:text-slate-100">
+          Inter-Camp Personnel Movements
+          <span class="ml-2 text-sm font-bold px-2.5 py-1 rounded-lg bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 align-middle"
+                x-text="isAdmin ? (locFilter === 'ALL' ? 'ALL BASES' : locFilter) : currentLocation">
+            <?= htmlspecialchars($currentLocation) ?>
+          </span>
+        </h2>
+        <p class="text-slate-800 dark:text-slate-400 text-sm mt-0.5">
+          Two-sided journey tracking for servicemen moving between SLAF bases (Origin OUT &rarr; Dest IN &rarr; Dest OUT &rarr; Origin Return IN).
+        </p>
+      </div>
+      <div>
+        <button type="button"
+                @click="openAddMovementModal()"
+                class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-sm text-white
+                       bg-gradient-to-r from-blue-600 to-blue-800 hover:from-blue-700 hover:to-blue-900
+                       shadow-md shadow-blue-700/25 active:scale-95 transition-all">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
+          </svg>
+          New Movement (Origin OUT)
+        </button>
+      </div>
+    </div>
+
+    <!-- Movement Stat Cards -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 mb-8">
+      <!-- Total Active In-Transit -->
+      <div class="stat-card bg-white dark:bg-[#071d35] rounded-2xl p-5 shadow-sm border border-slate-200 dark:border-blue-900/40">
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-xs font-bold text-slate-700 dark:text-blue-300/70 uppercase tracking-wider">Active Movements</p>
+            <p class="text-3xl font-black text-black dark:text-white mt-1" x-text="movementCounts.total_active || 0"></p>
+          </div>
+          <div class="p-3 bg-blue-50 dark:bg-blue-900/40 rounded-xl text-blue-600 dark:text-blue-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pending Arrivals -->
+      <div class="stat-card bg-white dark:bg-[#071d35] rounded-2xl p-5 shadow-sm border border-slate-200 dark:border-blue-900/40"
+           :class="movementCounts.pending_arrivals > 0 ? 'ring-2 ring-blue-500/50' : ''">
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-xs font-bold text-slate-700 dark:text-blue-300/70 uppercase tracking-wider">Pending Arrivals</p>
+            <p class="text-3xl font-black text-amber-600 dark:text-amber-400 mt-1" x-text="movementCounts.pending_arrivals || 0"></p>
+          </div>
+          <div class="p-3 bg-amber-50 dark:bg-amber-900/30 rounded-xl text-amber-600 dark:text-amber-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Inside Host Base -->
+      <div class="stat-card bg-white dark:bg-[#071d35] rounded-2xl p-5 shadow-sm border border-slate-200 dark:border-blue-900/40">
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-xs font-bold text-slate-700 dark:text-blue-300/70 uppercase tracking-wider">Inside Host Base</p>
+            <p class="text-3xl font-black text-emerald-700 dark:text-emerald-400 mt-1" x-text="movementCounts.inside_camp || 0"></p>
+          </div>
+          <div class="p-3 bg-emerald-50 dark:bg-emerald-900/30 rounded-xl text-emerald-600 dark:text-emerald-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Returning to Base -->
+      <div class="stat-card bg-white dark:bg-[#071d35] rounded-2xl p-5 shadow-sm border border-slate-200 dark:border-blue-900/40">
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-xs font-bold text-slate-700 dark:text-blue-300/70 uppercase tracking-wider">Returning Home</p>
+            <p class="text-3xl font-black text-blue-600 dark:text-blue-400 mt-1" x-text="movementCounts.returning || 0"></p>
+          </div>
+          <div class="p-3 bg-sky-50 dark:bg-sky-900/30 rounded-xl text-sky-600 dark:text-sky-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Movement Filter Bar -->
+    <div class="bg-white dark:bg-[#071525] rounded-2xl p-4 shadow-sm border border-slate-200 dark:border-blue-900/40 mb-6">
+      <div class="flex flex-col md:flex-row gap-3 items-center justify-between">
+        <div class="flex flex-wrap items-center gap-3 w-full md:w-auto">
+          <!-- Sub-view switcher -->
+          <div class="inline-flex rounded-xl p-1 bg-slate-100 dark:bg-blue-950/60 border border-slate-200 dark:border-blue-900/50">
+            <button type="button"
+                    @click="movementSubTab = 'all'; fetchMovements()"
+                    :class="movementSubTab === 'all' ? 'bg-white dark:bg-blue-900/60 text-blue-700 dark:text-white shadow-sm' : 'text-slate-600 dark:text-slate-400'"
+                    class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all">
+              All Movements
+            </button>
+            <button type="button"
+                    @click="movementSubTab = 'pending'; fetchMovements()"
+                    :class="movementSubTab === 'pending' ? 'bg-white dark:bg-blue-900/60 text-blue-700 dark:text-white shadow-sm' : 'text-slate-600 dark:text-slate-400'"
+                    class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5">
+              Pending Arrivals
+              <span class="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-500 text-white font-black"
+                    x-text="pendingArrivals.length"></span>
+            </button>
+          </div>
+
+          <!-- Status Filter -->
+          <select x-model="movementStatusFilter"
+                  @change="fetchMovements()"
+                  class="input-field text-xs font-semibold px-3 py-2 rounded-xl text-slate-800 dark:text-slate-100 bg-slate-50 dark:bg-[#071d35] border border-slate-200 dark:border-blue-900/50">
+            <option value="all">All Movement Statuses</option>
+            <option value="DEPARTED_ORIGIN">En Route to Destination (Stage A)</option>
+            <option value="ARRIVED_DESTINATION">Inside Destination Base (Stage B)</option>
+            <option value="DEPARTED_DESTINATION">Returning to Origin (Stage D)</option>
+            <option value="COMPLETED">Completed Journey (Stage E)</option>
+          </select>
+        </div>
+
+        <div class="flex items-center gap-3 w-full md:w-auto justify-end">
+          <div class="relative w-full md:w-64">
+            <input type="text"
+                   x-model="movementSearch"
+                   @input.debounce.300ms="fetchMovements()"
+                   placeholder="Search SVS, Name, Ref..."
+                   class="input-field w-full pl-9 pr-3 py-2 rounded-xl text-xs font-medium text-slate-800 dark:text-slate-100 bg-slate-50 dark:bg-[#071d35] border border-slate-200 dark:border-blue-900/50" />
+            <svg class="w-4 h-4 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+            </svg>
+          </div>
+
+          <button type="button"
+                  @click="fetchMovements()"
+                  title="Refresh records"
+                  class="p-2 rounded-xl border border-slate-200 dark:border-blue-900/50 bg-slate-50 dark:bg-[#071d35] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-blue-900/30">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Movements Table -->
+    <div class="bg-white dark:bg-[#071525] rounded-2xl shadow-sm border border-slate-200 dark:border-blue-900/40 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm border-collapse">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-[#071d35]/70 border-b border-slate-200 dark:border-blue-900/40 text-xs font-bold text-slate-600 dark:text-blue-300/80 uppercase tracking-wider">
+              <th class="py-3.5 px-4">Movement Ref</th>
+              <th class="py-3.5 px-4">Serviceman</th>
+              <th class="py-3.5 px-4">Journey Route</th>
+              <th class="py-3.5 px-4">Purpose &amp; Authority</th>
+              <th class="py-3.5 px-4">Status</th>
+              <th class="py-3.5 px-4">Out / In Timestamps</th>
+              <th class="py-3.5 px-4 text-right">Gate Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-blue-900/30">
+            <template x-for="m in displayedMovements" :key="m.id">
+              <tr class="hover:bg-slate-50/80 dark:hover:bg-blue-900/10 transition-colors">
+                <!-- Ref -->
+                <td class="py-3.5 px-4 font-mono font-bold text-xs text-blue-700 dark:text-blue-400">
+                  <span x-text="m.movement_ref"></span>
+                </td>
+
+                <!-- Serviceman -->
+                <td class="py-3.5 px-4">
+                  <div class="font-bold text-slate-900 dark:text-white" x-text="(m.rank ? m.rank + ' ' : '') + m.name"></div>
+                  <div class="text-xs text-slate-500 font-mono" x-text="'SVS: ' + m.svs_no + (m.nic_no ? ' · NIC: ' + m.nic_no : '')"></div>
+                </td>
+
+                <!-- Route -->
+                <td class="py-3.5 px-4">
+                  <div class="inline-flex items-center gap-1.5 font-bold text-xs">
+                    <span class="px-2 py-0.5 rounded bg-slate-100 dark:bg-blue-950 text-slate-800 dark:text-blue-200 border border-slate-200 dark:border-blue-900/50"
+                          x-text="m.origin_camp"></span>
+                    <span class="text-slate-400">&rarr;</span>
+                    <span class="px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-900/50 text-blue-800 dark:text-blue-200 border border-blue-200 dark:border-blue-800/50"
+                          x-text="m.destination_camp"></span>
+                  </div>
+                </td>
+
+                <!-- Purpose & Authority -->
+                <td class="py-3.5 px-4 max-w-xs">
+                  <div class="text-xs text-slate-800 dark:text-slate-200 font-medium truncate" x-text="m.purpose_of_visit" :title="m.purpose_of_visit"></div>
+                  <div class="text-[11px] text-slate-500 truncate" x-text="'Auth: ' + (m.authority_name || '—') + (m.authority_ref ? ' (' + m.authority_ref + ')' : '')"></div>
+                </td>
+
+                <!-- Status Badge -->
+                <td class="py-3.5 px-4">
+                  <span x-show="m.movement_status === 'DEPARTED_ORIGIN'"
+                        class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200">
+                    En Route to Host
+                  </span>
+                  <span x-show="m.movement_status === 'ARRIVED_DESTINATION'"
+                        class="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-200">
+                    Inside Host Base
+                  </span>
+                  <span x-show="m.movement_status === 'DEPARTED_DESTINATION'"
+                        class="px-2.5 py-1 rounded-full text-xs font-bold bg-sky-100 text-sky-800 dark:bg-sky-900/50 dark:text-sky-200">
+                    Returning Home
+                  </span>
+                  <span x-show="m.movement_status === 'COMPLETED'"
+                        class="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                    Completed
+                  </span>
+                </td>
+
+                <!-- Timestamps -->
+                <td class="py-3.5 px-4 text-xs text-slate-600 dark:text-slate-400">
+                  <div x-text="'OUT: ' + m.out_fmt"></div>
+                  <div x-show="m.actual_in_at" x-text="'IN: ' + m.in_fmt"></div>
+                  <div x-show="m.actual_return_in_at" x-text="'RTN: ' + m.return_in_fmt"></div>
+                </td>
+
+                <!-- Actions -->
+                <td class="py-3.5 px-4 text-right">
+                  <div class="inline-flex items-center gap-1.5 justify-end">
+                    <!-- Confirm Destination IN (Stage B) -->
+                    <button type="button"
+                            x-show="m.movement_status === 'DEPARTED_ORIGIN' && (isAdmin || m.destination_camp === currentLocation)"
+                            @click="openDestInModal(m)"
+                            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-all">
+                      Confirm IN
+                    </button>
+
+                    <!-- Destination OUT (Stage D) -->
+                    <button type="button"
+                            x-show="m.movement_status === 'ARRIVED_DESTINATION' && (isAdmin || m.destination_camp === currentLocation)"
+                            @click="openDestOutModal(m)"
+                            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white shadow-sm transition-all">
+                      Check OUT
+                    </button>
+
+                    <!-- Origin Return IN (Stage E) -->
+                    <button type="button"
+                            x-show="m.movement_status === 'DEPARTED_DESTINATION' && (isAdmin || m.origin_camp === currentLocation)"
+                            @click="openReturnInModal(m)"
+                            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-all">
+                      Confirm Return
+                    </button>
+
+                    <!-- View Journey Timeline -->
+                    <button type="button"
+                            @click="openMovementTimeline(m)"
+                            title="View chronological movement audit events"
+                            class="p-1.5 rounded-lg border border-slate-200 dark:border-blue-900/50 bg-slate-50 dark:bg-blue-950/40 text-slate-600 dark:text-blue-300 hover:bg-slate-100">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                      </svg>
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="displayedMovements.length === 0">
+              <td colspan="7" class="py-12 text-center text-slate-400 text-sm">
+                No matching inter-camp personnel movements found.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div><!-- /activeTab === 'movements' -->
+
+  <!-- ── TAB: TEMPORARY ACCOMMODATION ── -->
+  <div x-show="activeTab === 'accommodation'" x-cloak>
+    <!-- Page title -->
+    <div class="mb-8 flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <h2 class="text-2xl font-black text-black dark:text-slate-100">
+          Temporary Accommodation
+          <span class="ml-2 text-sm font-bold px-2.5 py-1 rounded-lg bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 align-middle"
+                x-text="isAdmin ? (locFilter === 'ALL' ? 'ALL HOST BASES' : locFilter) : currentLocation">
+            <?= htmlspecialchars($currentLocation) ?>
+          </span>
+        </h2>
+        <p class="text-slate-800 dark:text-slate-400 text-sm mt-0.5">
+          24-hour default temporary accommodation validity monitoring, approaching-expiry alerts, and authorized extension tracking.
+        </p>
+      </div>
+      <div>
+        <button type="button"
+                @click="fetchAccommodations()"
+                class="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border border-slate-200 dark:border-blue-900/50 bg-white dark:bg-[#071525] text-slate-700 dark:text-blue-200 hover:bg-slate-50">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+          Refresh Accommodations
+        </button>
+      </div>
+    </div>
+
+    <!-- Stat Cards -->
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-5 mb-8">
+      <!-- Currently Accommodated -->
+      <div class="stat-card bg-white dark:bg-[#071d35] rounded-2xl p-5 shadow-sm border border-slate-200 dark:border-blue-900/40">
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-xs font-bold text-slate-700 dark:text-blue-300/70 uppercase tracking-wider">Currently Accommodated</p>
+            <p class="text-3xl font-black text-black dark:text-white mt-1" x-text="movementCounts.accommodated || 0"></p>
+          </div>
+          <div class="p-3 bg-blue-50 dark:bg-blue-900/40 rounded-xl text-blue-600 dark:text-blue-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Expiring Soon (< 4h) -->
+      <div class="stat-card bg-white dark:bg-[#071d35] rounded-2xl p-5 shadow-sm border border-slate-200 dark:border-blue-900/40"
+           :class="movementCounts.expiring_soon > 0 ? 'ring-2 ring-amber-500' : ''">
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-xs font-bold text-slate-700 dark:text-blue-300/70 uppercase tracking-wider">Expiring Soon (&lt; 4h)</p>
+            <p class="text-3xl font-black text-amber-600 dark:text-amber-400 mt-1" x-text="movementCounts.expiring_soon || 0"></p>
+          </div>
+          <div class="p-3 bg-amber-50 dark:bg-amber-900/30 rounded-xl text-amber-600 dark:text-amber-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Expired Inside Base -->
+      <div class="stat-card bg-white dark:bg-[#071d35] rounded-2xl p-5 shadow-sm border border-slate-200 dark:border-blue-900/40"
+           :class="movementCounts.expired > 0 ? 'ring-2 ring-red-500 animate-pulse' : ''">
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-xs font-bold text-slate-700 dark:text-blue-300/70 uppercase tracking-wider">Expired (Inside Base)</p>
+            <p class="text-3xl font-black text-red-600 dark:text-red-400 mt-1" x-text="movementCounts.expired || 0"></p>
+          </div>
+          <div class="p-3 bg-red-50 dark:bg-red-900/30 rounded-xl text-red-600 dark:text-red-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Accommodations Table -->
+    <div class="bg-white dark:bg-[#071525] rounded-2xl shadow-sm border border-slate-200 dark:border-blue-900/40 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm border-collapse">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-[#071d35]/70 border-b border-slate-200 dark:border-blue-900/40 text-xs font-bold text-slate-600 dark:text-blue-300/80 uppercase tracking-wider">
+              <th class="py-3.5 px-4">Airman</th>
+              <th class="py-3.5 px-4">Home Base &rarr; Host Base</th>
+              <th class="py-3.5 px-4">Check-In Time</th>
+              <th class="py-3.5 px-4">Validity Expiry</th>
+              <th class="py-3.5 px-4">Time Remaining</th>
+              <th class="py-3.5 px-4">Status &amp; Billet</th>
+              <th class="py-3.5 px-4 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-blue-900/30">
+            <template x-for="a in accommodations" :key="a.id">
+              <tr class="hover:bg-slate-50/80 dark:hover:bg-blue-900/10 transition-colors">
+                <!-- Airman -->
+                <td class="py-3.5 px-4">
+                  <div class="font-bold text-slate-900 dark:text-white" x-text="(a.rank ? a.rank + ' ' : '') + a.name"></div>
+                  <div class="text-xs text-slate-500 font-mono" x-text="'SVS: ' + a.svs_no"></div>
+                </td>
+
+                <!-- Route -->
+                <td class="py-3.5 px-4 text-xs font-bold">
+                  <span class="text-slate-600 dark:text-slate-300" x-text="a.origin_camp"></span>
+                  <span class="text-slate-400 mx-1">&rarr;</span>
+                  <span class="text-blue-700 dark:text-blue-400" x-text="a.camp_code"></span>
+                </td>
+
+                <!-- Checkin -->
+                <td class="py-3.5 px-4 text-xs text-slate-600 dark:text-slate-400" x-text="a.checkin_fmt"></td>
+
+                <!-- Expiry -->
+                <td class="py-3.5 px-4 text-xs font-mono font-semibold"
+                    :class="a.accommodation_status === 'EXPIRED' ? 'text-red-600 dark:text-red-400' : 'text-slate-700 dark:text-slate-300'"
+                    x-text="a.expires_fmt"></td>
+
+                <!-- Time Remaining -->
+                <td class="py-3.5 px-4">
+                  <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold"
+                        :class="a.time_left_class"
+                        x-text="a.time_left_str"></span>
+                </td>
+
+                <!-- Status & Billet -->
+                <td class="py-3.5 px-4 text-xs">
+                  <span x-show="a.accommodation_status === 'ACTIVE'" class="px-2 py-0.5 rounded font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-200">ACTIVE</span>
+                  <span x-show="a.accommodation_status === 'EXPIRING_SOON'" class="px-2 py-0.5 rounded font-bold bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200 animate-pulse">EXPIRING SOON</span>
+                  <span x-show="a.accommodation_status === 'EXPIRED'" class="px-2 py-0.5 rounded font-bold bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-200">EXPIRED</span>
+                  <span x-show="a.accommodation_status === 'EXTENDED'" class="px-2 py-0.5 rounded font-bold bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-200">EXTENDED</span>
+                  <span x-show="a.accommodation_status === 'CLOSED'" class="px-2 py-0.5 rounded font-bold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">CLOSED</span>
+                  <div x-show="a.billet_location" class="text-[11px] text-slate-500 mt-0.5" x-text="'Billet: ' + a.billet_location"></div>
+                </td>
+
+                <!-- Action: Extend -->
+                <td class="py-3.5 px-4 text-right">
+                  <button type="button"
+                          x-show="a.accommodation_status !== 'CLOSED' && (isAdmin || a.camp_code === currentLocation)"
+                          @click="openExtendAccomModal(a)"
+                          class="px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-blue-600 to-blue-800 hover:from-blue-700 hover:to-blue-900 text-white shadow-sm transition-all">
+                    + Extend
+                  </button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="accommodations.length === 0">
+              <td colspan="7" class="py-12 text-center text-slate-400 text-sm">
+                No active temporary accommodation records found.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div><!-- /activeTab === 'accommodation' -->
+
+  <!-- ── TAB: PERSONNEL & MOVEMENT INQUIRY ── -->
+  <div x-show="activeTab === 'inquiry'" x-cloak>
+    <!-- Page title -->
+    <div class="mb-8 flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <h2 class="text-2xl font-black text-black dark:text-slate-100">
+          Personnel &amp; Movement Inquiry
+        </h2>
+        <p class="text-slate-800 dark:text-slate-400 text-sm mt-0.5">
+          Multi-parameter inquiry across servicemen master records, origin/destination journeys, and audit history.
+        </p>
+      </div>
+    </div>
+
+    <!-- Inquiry Filter Card -->
+    <div class="bg-white dark:bg-[#071525] rounded-2xl p-6 shadow-sm border border-slate-200 dark:border-blue-900/40 mb-8">
+      <form @submit.prevent="executeInquiry()" class="space-y-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <!-- Service Number -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase">Service Number</label>
+            <input type="text" x-model="inquiryFilters.svs_no" placeholder="e.g. S/12345"
+                   class="input-field w-full px-3 py-2 rounded-xl text-xs font-medium text-slate-800 dark:text-slate-100 bg-slate-50 dark:bg-[#071d35] border border-slate-200 dark:border-blue-900/50" />
+          </div>
+
+          <!-- Name -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase">Personnel Name</label>
+            <input type="text" x-model="inquiryFilters.name" placeholder="Search by name"
+                   class="input-field w-full px-3 py-2 rounded-xl text-xs font-medium text-slate-800 dark:text-slate-100 bg-slate-50 dark:bg-[#071d35] border border-slate-200 dark:border-blue-900/50" />
+          </div>
+
+          <!-- Movement Reference -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase">Movement Ref No</label>
+            <input type="text" x-model="inquiryFilters.movement_ref" placeholder="e.g. MOV-20261113-..."
+                   class="input-field w-full px-3 py-2 rounded-xl text-xs font-medium text-slate-800 dark:text-slate-100 bg-slate-50 dark:bg-[#071d35] border border-slate-200 dark:border-blue-900/50" />
+          </div>
+
+          <!-- Status -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase">Movement Status</label>
+            <select x-model="inquiryFilters.status"
+                    class="input-field w-full px-3 py-2 rounded-xl text-xs font-medium text-slate-800 dark:text-slate-100 bg-slate-50 dark:bg-[#071d35] border border-slate-200 dark:border-blue-900/50">
+              <option value="">Any Status</option>
+              <option value="DEPARTED_ORIGIN">En Route to Destination</option>
+              <option value="ARRIVED_DESTINATION">Inside Destination Base</option>
+              <option value="DEPARTED_DESTINATION">Returning to Origin</option>
+              <option value="COMPLETED">Completed</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-3 pt-2">
+          <button type="button" @click="resetInquiry()"
+                  class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-blue-900/30">
+            Reset Filters
+          </button>
+          <button type="submit"
+                  class="px-5 py-2 rounded-xl text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 shadow-sm transition-all">
+            Execute Inquiry
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Inquiry Results -->
+    <div class="bg-white dark:bg-[#071525] rounded-2xl shadow-sm border border-slate-200 dark:border-blue-900/40 overflow-hidden">
+      <div class="px-5 py-4 border-b border-slate-100 dark:border-blue-900/40 flex items-center justify-between">
+        <h3 class="font-bold text-sm text-slate-900 dark:text-white">Inquiry Records (<span x-text="inquiryResults.length"></span>)</h3>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm border-collapse">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-[#071d35]/70 border-b border-slate-200 dark:border-blue-900/40 text-xs font-bold text-slate-600 dark:text-blue-300/80 uppercase tracking-wider">
+              <th class="py-3 px-4">Ref</th>
+              <th class="py-3 px-4">Airman</th>
+              <th class="py-3 px-4">Route</th>
+              <th class="py-3 px-4">Purpose</th>
+              <th class="py-3 px-4">Status</th>
+              <th class="py-3 px-4">Dispatch Date</th>
+              <th class="py-3 px-4 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-blue-900/30">
+            <template x-for="r in inquiryResults" :key="r.id">
+              <tr class="hover:bg-slate-50/80 dark:hover:bg-blue-900/10 transition-colors">
+                <td class="py-3 px-4 font-mono font-bold text-xs text-blue-700 dark:text-blue-400" x-text="r.movement_ref"></td>
+                <td class="py-3 px-4">
+                  <div class="font-bold text-slate-900 dark:text-white" x-text="(r.rank ? r.rank + ' ' : '') + r.name"></div>
+                  <div class="text-xs text-slate-500 font-mono" x-text="'SVS: ' + r.svs_no"></div>
+                </td>
+                <td class="py-3 px-4 text-xs font-bold">
+                  <span x-text="r.origin_camp"></span> &rarr; <span x-text="r.destination_camp"></span>
+                </td>
+                <td class="py-3 px-4 text-xs max-w-xs truncate" x-text="r.purpose_of_visit"></td>
+                <td class="py-3 px-4">
+                  <span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
+                        x-text="r.movement_status"></span>
+                </td>
+                <td class="py-3 px-4 text-xs text-slate-500" x-text="r.out_fmt"></td>
+                <td class="py-3 px-4 text-right">
+                  <button type="button" @click="openMovementTimeline(r)"
+                          class="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 dark:bg-blue-950 dark:hover:bg-blue-900 text-slate-700 dark:text-blue-200">
+                    View Journey
+                  </button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="inquiryResults.length === 0">
+              <td colspan="7" class="py-12 text-center text-slate-400 text-sm">
+                Enter search parameters above to perform an inquiry.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div><!-- /activeTab === 'inquiry' -->
+
+  <!-- ── TAB: SYSTEM AUDIT LOGS ── -->
+  <div x-show="activeTab === 'audit'" x-cloak>
+    <!-- Page title -->
+    <div class="mb-8 flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <h2 class="text-2xl font-black text-black dark:text-slate-100">
+          Security &amp; Operations Audit Trail
+        </h2>
+        <p class="text-slate-800 dark:text-slate-400 text-sm mt-0.5">
+          Append-only chronological audit log of all gate operations, temporary accommodation events, and administrative changes.
+        </p>
+      </div>
+      <div>
+        <button type="button"
+                @click="fetchAuditLogs()"
+                class="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border border-slate-200 dark:border-blue-900/50 bg-white dark:bg-[#071525] text-slate-700 dark:text-blue-200 hover:bg-slate-50">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+          Refresh Audit Trail
+        </button>
+      </div>
+    </div>
+
+    <!-- Audit Table -->
+    <div class="bg-white dark:bg-[#071525] rounded-2xl shadow-sm border border-slate-200 dark:border-blue-900/40 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm border-collapse">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-[#071d35]/70 border-b border-slate-200 dark:border-blue-900/40 text-xs font-bold text-slate-600 dark:text-blue-300/80 uppercase tracking-wider">
+              <th class="py-3 px-4">Timestamp</th>
+              <th class="py-3 px-4">Operator / User</th>
+              <th class="py-3 px-4">Base</th>
+              <th class="py-3 px-4">Action Type</th>
+              <th class="py-3 px-4">Reference / Entity</th>
+              <th class="py-3 px-4">Details Summary</th>
+              <th class="py-3 px-4">IP Address</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-blue-900/30">
+            <template x-for="log in auditLogs" :key="log.id">
+              <tr class="hover:bg-slate-50/80 dark:hover:bg-blue-900/10 transition-colors">
+                <td class="py-3 px-4 text-xs font-mono text-slate-500 whitespace-nowrap" x-text="log.created_fmt"></td>
+                <td class="py-3 px-4 font-bold text-slate-800 dark:text-slate-200" x-text="log.username"></td>
+                <td class="py-3 px-4 text-xs font-bold text-blue-700 dark:text-blue-400" x-text="log.camp_code"></td>
+                <td class="py-3 px-4">
+                  <span class="px-2 py-0.5 rounded text-xs font-bold"
+                        :class="log.action_type.includes('IN') ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' : (log.action_type.includes('OUT') ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300')"
+                        x-text="log.action_type"></span>
+                </td>
+                <td class="py-3 px-4 text-xs font-mono font-semibold" x-text="log.reference_no || ('#' + log.entity_id)"></td>
+                <td class="py-3 px-4 text-xs text-slate-600 dark:text-slate-400 max-w-sm truncate" x-text="JSON.stringify(log.details_obj)"></td>
+                <td class="py-3 px-4 text-xs font-mono text-slate-400" x-text="log.ip_address"></td>
+              </tr>
+            </template>
+            <tr x-show="auditLogs.length === 0">
+              <td colspan="7" class="py-12 text-center text-slate-400 text-sm">
+                No audit trail records found.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div><!-- /activeTab === 'audit' -->
 
   <?php if ($isAdmin): ?>
   <!-- ── TAB 2: USER ACCOUNTS & ACCESS ── -->
@@ -2670,6 +3531,423 @@ if ($isAdmin) {
 <?php endif; ?>
 
 <!-- ═══════════════════════════════════════════════════════════
+     INTER-CAMP MOVEMENT MODALS
+══════════════════════════════════════════════════════════════ -->
+
+<!-- 1. Origin OUT Modal -->
+<div x-show="modal === 'addMovement'" x-cloak
+     class="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop"
+     @keydown.escape.window="closeModal()">
+  <div @click.self="closeModal()" class="absolute inset-0"></div>
+  <div class="relative bg-white dark:bg-[#071d35] rounded-2xl shadow-2xl w-full max-w-2xl p-6 sm:p-7
+              animate-slide-up border border-slate-200 dark:border-blue-900/40 max-h-[90vh] overflow-y-auto">
+    <div class="flex items-center justify-between mb-5">
+      <div>
+        <h4 class="text-xl font-black text-black dark:text-slate-100">Register Movement (Origin OUT)</h4>
+        <p class="text-xs text-slate-600 dark:text-slate-400">Dispatch airman on official visit to another SLAF base.</p>
+      </div>
+      <button @click="closeModal()" class="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <form @submit.prevent="submitAddMovement()" class="space-y-4">
+      <!-- Airman Lookup / Info -->
+      <div class="p-4 rounded-xl bg-slate-50 dark:bg-blue-950/40 border border-slate-200 dark:border-blue-900/50 space-y-3">
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <!-- SVS No -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">
+              Service Number *
+            </label>
+            <input type="text" x-model="movementForm.svs_no"
+                   @input.debounce.300ms="checkPersonnelLookup()"
+                   required placeholder="e.g. S/12345"
+                   class="input-field w-full px-3 py-2 rounded-xl text-xs font-bold text-slate-900 dark:text-white bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60 uppercase" />
+          </div>
+
+          <!-- Rank -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Rank *</label>
+            <select x-model="movementForm.rank" required
+                    class="input-field w-full px-3 py-2 rounded-xl text-xs font-medium text-slate-900 dark:text-white bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60">
+              <option value="">— Select Rank —</option>
+              <?php
+              $ranks = ['AC','LAC','CPL','SGT','FSGT','WO','MWO','Plt Off','Fg Off','Flt Lt','Sqn Ldr','Wg Cdr','Gp Capt','Air Cdre','AVM'];
+              foreach ($ranks as $r) echo "<option value='$r'>$r</option>";
+              ?>
+            </select>
+          </div>
+
+          <!-- NIC No -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">NIC No</label>
+            <input type="text" x-model="movementForm.nic_no" placeholder="e.g. 199012345678"
+                   class="input-field w-full px-3 py-2 rounded-xl text-xs font-medium text-slate-900 dark:text-white bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+          </div>
+        </div>
+
+        <!-- Name -->
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Full Name *</label>
+          <input type="text" x-model="movementForm.name" required placeholder="Enter airman's full name"
+                 class="input-field w-full px-3 py-2 rounded-xl text-xs font-medium text-slate-900 dark:text-white bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+        </div>
+      </div>
+
+      <!-- Route: Origin & Destination -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Origin (Parent Base) *</label>
+          <select x-model="movementForm.origin_camp" required :disabled="!isAdmin"
+                  class="input-field w-full px-3 py-2 rounded-xl text-xs font-bold text-slate-900 dark:text-white bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60">
+            <template x-for="loc in activeLocations" :key="loc.code">
+              <option :value="loc.code" x-text="loc.code + ' — ' + (loc.name || loc.code)"></option>
+            </template>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Destination Base *</label>
+          <select x-model="movementForm.destination_camp" required
+                  class="input-field w-full px-3 py-2 rounded-xl text-xs font-bold text-blue-700 dark:text-blue-400 bg-white dark:bg-[#071d35] border border-blue-400 dark:border-blue-700">
+            <option value="">— Select Destination Base —</option>
+            <template x-for="loc in activeLocations" :key="loc.code">
+              <option :value="loc.code" x-text="loc.code + ' — ' + (loc.name || loc.code)" :disabled="loc.code === movementForm.origin_camp"></option>
+            </template>
+          </select>
+        </div>
+      </div>
+
+      <!-- Purpose of Visit -->
+      <div>
+        <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Purpose of Visit *</label>
+        <textarea x-model="movementForm.purpose_of_visit" required rows="2" placeholder="Official duty, court martial witness, transit, sports, etc."
+                  class="input-field w-full px-3 py-2 rounded-xl text-xs font-medium text-slate-900 dark:text-white bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60"></textarea>
+      </div>
+
+      <!-- Authority Details -->
+      <div class="p-3.5 rounded-xl bg-slate-50 dark:bg-blue-950/30 border border-slate-200 dark:border-blue-900/50 space-y-2.5">
+        <p class="text-[11px] font-bold text-slate-600 dark:text-blue-300/80 uppercase tracking-wider">Authorizing Officer Details</p>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          <input type="text" x-model="movementForm.authority_name" placeholder="Officer Name"
+                 class="input-field w-full px-3 py-1.5 rounded-lg text-xs bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+          <input type="text" x-model="movementForm.authority_rank" placeholder="Officer Rank"
+                 class="input-field w-full px-3 py-1.5 rounded-lg text-xs bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+          <input type="text" x-model="movementForm.authority_ref" placeholder="Signal / Authority Ref No"
+                 class="input-field w-full px-3 py-1.5 rounded-lg text-xs bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+        </div>
+      </div>
+
+      <!-- Expected Arrival / Return -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Expected Arrival at Destination</label>
+          <input type="datetime-local" x-model="movementForm.expected_arrival"
+                 class="input-field w-full px-3 py-2 rounded-xl text-xs bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Expected Return to Base</label>
+          <input type="datetime-local" x-model="movementForm.expected_return"
+                 class="input-field w-full px-3 py-2 rounded-xl text-xs bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+        </div>
+      </div>
+
+      <!-- Remarks -->
+      <div>
+        <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Remarks</label>
+        <input type="text" x-model="movementForm.remarks" placeholder="Optional gate remarks"
+               class="input-field w-full px-3 py-2 rounded-xl text-xs bg-white dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+      </div>
+
+      <div x-show="movementError" x-cloak class="p-3 rounded-xl bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 text-xs font-medium" x-text="movementError"></div>
+
+      <div class="flex justify-end gap-3 pt-3 border-t border-slate-100 dark:border-blue-900/40">
+        <button type="button" @click="closeModal()" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100">Cancel</button>
+        <button type="submit" :disabled="submitting"
+                class="px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-blue-600 to-blue-800 hover:from-blue-700 hover:to-blue-900 shadow-md disabled:opacity-50">
+          Confirm Dispatch (Origin OUT)
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 2. Destination IN Confirmation Modal -->
+<div x-show="modal === 'destIn'" x-cloak
+     class="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop"
+     @keydown.escape.window="closeModal()">
+  <div @click.self="closeModal()" class="absolute inset-0"></div>
+  <div class="relative bg-white dark:bg-[#071d35] rounded-2xl shadow-2xl w-full max-w-lg p-6
+              animate-slide-up border border-slate-200 dark:border-blue-900/40">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h4 class="text-lg font-bold text-black dark:text-slate-100">Confirm Host Base Arrival (IN)</h4>
+        <p class="text-xs text-slate-600 dark:text-slate-400">Verify serviceman arrival at destination base.</p>
+      </div>
+      <button @click="closeModal()" class="p-2 rounded-xl hover:bg-slate-100 text-slate-500">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <template x-if="activeTargetMovement">
+      <div class="space-y-4">
+        <div class="p-4 rounded-xl bg-slate-50 dark:bg-blue-950/40 border border-slate-200 dark:border-blue-900/50">
+          <div class="flex items-center justify-between text-xs font-mono font-bold text-blue-700 dark:text-blue-400 mb-2">
+            <span x-text="activeTargetMovement.movement_ref"></span>
+            <span class="px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200"
+                  x-text="activeTargetMovement.origin_camp + ' &rarr; ' + activeTargetMovement.destination_camp"></span>
+          </div>
+          <div class="text-base font-black text-slate-900 dark:text-white"
+               x-text="(activeTargetMovement.rank ? activeTargetMovement.rank + ' ' : '') + activeTargetMovement.name"></div>
+          <div class="text-xs text-slate-500 font-mono mt-0.5" x-text="'Service No: ' + activeTargetMovement.svs_no"></div>
+          <div class="text-xs text-slate-700 dark:text-slate-300 mt-2 font-medium" x-text="'Purpose: ' + activeTargetMovement.purpose_of_visit"></div>
+        </div>
+
+        <div class="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/50 text-xs text-emerald-800 dark:text-emerald-300 font-medium">
+          &check; A 24-hour temporary accommodation validity period will automatically activate starting from confirmation.
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Billet / Room Location (Optional)</label>
+          <input type="text" x-model="actionForm.billet" placeholder="e.g. Transit Billet Room 4"
+                 class="input-field w-full px-3.5 py-2 rounded-xl text-xs bg-slate-50 dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Gate Remarks</label>
+          <input type="text" x-model="actionForm.remarks" placeholder="Optional arrival remarks"
+                 class="input-field w-full px-3.5 py-2 rounded-xl text-xs bg-slate-50 dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+        </div>
+
+        <div class="flex justify-end gap-3 pt-3 border-t border-slate-100 dark:border-blue-900/40">
+          <button type="button" @click="closeModal()" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300">Cancel</button>
+          <button type="button" @click="submitDestIn()" :disabled="submitting"
+                  class="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 shadow-md">
+            Confirm Arrival &amp; Activate Accommodation
+          </button>
+        </div>
+      </div>
+    </template>
+  </div>
+</div>
+
+<!-- 3. Destination OUT Modal -->
+<div x-show="modal === 'destOut'" x-cloak
+     class="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop"
+     @keydown.escape.window="closeModal()">
+  <div @click.self="closeModal()" class="absolute inset-0"></div>
+  <div class="relative bg-white dark:bg-[#071d35] rounded-2xl shadow-2xl w-full max-w-lg p-6
+              animate-slide-up border border-slate-200 dark:border-blue-900/40">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h4 class="text-lg font-bold text-black dark:text-slate-100">Confirm Host Base Departure (OUT)</h4>
+        <p class="text-xs text-slate-600 dark:text-slate-400">Record serviceman departure from host base. Closes temporary accommodation.</p>
+      </div>
+      <button @click="closeModal()" class="p-2 rounded-xl hover:bg-slate-100 text-slate-500">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <template x-if="activeTargetMovement">
+      <div class="space-y-4">
+        <div class="p-4 rounded-xl bg-slate-50 dark:bg-blue-950/40 border border-slate-200 dark:border-blue-900/50">
+          <div class="font-bold text-slate-900 dark:text-white"
+               x-text="(activeTargetMovement.rank ? activeTargetMovement.rank + ' ' : '') + activeTargetMovement.name + ' (' + activeTargetMovement.svs_no + ')'"></div>
+          <div class="text-xs text-slate-500 mt-1" x-text="'Departing from ' + activeTargetMovement.destination_camp + ' &rarr; Returning to ' + activeTargetMovement.origin_camp"></div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Departure Remarks</label>
+          <input type="text" x-model="actionForm.remarks" placeholder="Optional checkout remarks"
+                 class="input-field w-full px-3.5 py-2 rounded-xl text-xs bg-slate-50 dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+        </div>
+
+        <div class="flex justify-end gap-3 pt-3 border-t border-slate-100 dark:border-blue-900/40">
+          <button type="button" @click="closeModal()" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300">Cancel</button>
+          <button type="button" @click="submitDestOut()" :disabled="submitting"
+                  class="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 shadow-md">
+            Confirm Departure from Base
+          </button>
+        </div>
+      </div>
+    </template>
+  </div>
+</div>
+
+<!-- 4. Origin Return IN Modal -->
+<div x-show="modal === 'returnIn'" x-cloak
+     class="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop"
+     @keydown.escape.window="closeModal()">
+  <div @click.self="closeModal()" class="absolute inset-0"></div>
+  <div class="relative bg-white dark:bg-[#071d35] rounded-2xl shadow-2xl w-full max-w-lg p-6
+              animate-slide-up border border-slate-200 dark:border-blue-900/40">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h4 class="text-lg font-bold text-black dark:text-slate-100">Confirm Return to Parent Base (Final IN)</h4>
+        <p class="text-xs text-slate-600 dark:text-slate-400">Serviceman has returned to home base. Finalizes the movement journey as COMPLETED.</p>
+      </div>
+      <button @click="closeModal()" class="p-2 rounded-xl hover:bg-slate-100 text-slate-500">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <template x-if="activeTargetMovement">
+      <div class="space-y-4">
+        <div class="p-4 rounded-xl bg-slate-50 dark:bg-blue-950/40 border border-slate-200 dark:border-blue-900/50">
+          <div class="font-bold text-slate-900 dark:text-white"
+               x-text="(activeTargetMovement.rank ? activeTargetMovement.rank + ' ' : '') + activeTargetMovement.name + ' (' + activeTargetMovement.svs_no + ')'"></div>
+          <div class="text-xs text-slate-500 mt-1" x-text="'Returned safely from ' + activeTargetMovement.destination_camp + ' to ' + activeTargetMovement.origin_camp"></div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Return Remarks</label>
+          <input type="text" x-model="actionForm.remarks" placeholder="Optional return remarks"
+                 class="input-field w-full px-3.5 py-2 rounded-xl text-xs bg-slate-50 dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+        </div>
+
+        <div class="flex justify-end gap-3 pt-3 border-t border-slate-100 dark:border-blue-900/40">
+          <button type="button" @click="closeModal()" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300">Cancel</button>
+          <button type="button" @click="submitReturnIn()" :disabled="submitting"
+                  class="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-blue-600 to-blue-800 hover:from-blue-700 hover:to-blue-900 shadow-md">
+            Confirm Return &amp; Complete Journey
+          </button>
+        </div>
+      </div>
+    </template>
+  </div>
+</div>
+
+<!-- 5. Extend Accommodation Modal -->
+<div x-show="modal === 'extendAccom'" x-cloak
+     class="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop"
+     @keydown.escape.window="closeModal()">
+  <div @click.self="closeModal()" class="absolute inset-0"></div>
+  <div class="relative bg-white dark:bg-[#071d35] rounded-2xl shadow-2xl w-full max-w-lg p-6
+              animate-slide-up border border-slate-200 dark:border-blue-900/40">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h4 class="text-lg font-bold text-black dark:text-slate-100">Extend Temporary Accommodation</h4>
+        <p class="text-xs text-slate-600 dark:text-slate-400">Grant an authorized validity extension for accommodated airman.</p>
+      </div>
+      <button @click="closeModal()" class="p-2 rounded-xl hover:bg-slate-100 text-slate-500">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <template x-if="activeTargetAccom">
+      <form @submit.prevent="submitExtendAccom()" class="space-y-4">
+        <div class="p-3.5 rounded-xl bg-slate-50 dark:bg-blue-950/40 border border-slate-200 dark:border-blue-900/50">
+          <div class="font-bold text-sm text-slate-900 dark:text-white"
+               x-text="(activeTargetAccom.rank ? activeTargetAccom.rank + ' ' : '') + activeTargetAccom.name + ' (' + activeTargetAccom.svs_no + ')'"></div>
+          <div class="text-xs text-slate-500 mt-0.5" x-text="'Current Expiry: ' + activeTargetAccom.expires_fmt"></div>
+        </div>
+
+        <!-- Extension Hours -->
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Additional Duration (Hours) *</label>
+          <div class="grid grid-cols-4 gap-2 mb-2">
+            <button type="button" @click="extendForm.hours = 12"
+                    :class="extendForm.hours === 12 ? 'bg-blue-600 text-white font-bold' : 'bg-slate-100 dark:bg-blue-950 text-slate-700 dark:text-slate-300'"
+                    class="py-1.5 rounded-lg text-xs transition-colors">+12 Hours</button>
+            <button type="button" @click="extendForm.hours = 24"
+                    :class="extendForm.hours === 24 ? 'bg-blue-600 text-white font-bold' : 'bg-slate-100 dark:bg-blue-950 text-slate-700 dark:text-slate-300'"
+                    class="py-1.5 rounded-lg text-xs transition-colors">+24 Hours</button>
+            <button type="button" @click="extendForm.hours = 48"
+                    :class="extendForm.hours === 48 ? 'bg-blue-600 text-white font-bold' : 'bg-slate-100 dark:bg-blue-950 text-slate-700 dark:text-slate-300'"
+                    class="py-1.5 rounded-lg text-xs transition-colors">+48 Hours</button>
+            <button type="button" @click="extendForm.hours = 72"
+                    :class="extendForm.hours === 72 ? 'bg-blue-600 text-white font-bold' : 'bg-slate-100 dark:bg-blue-950 text-slate-700 dark:text-slate-300'"
+                    class="py-1.5 rounded-lg text-xs transition-colors">+72 Hours</button>
+          </div>
+          <input type="number" x-model.number="extendForm.hours" min="1" max="168" required
+                 placeholder="Custom hours"
+                 class="input-field w-full px-3.5 py-2 rounded-xl text-xs bg-slate-50 dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+        </div>
+
+        <!-- Authorizing Officer -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Authorizing Officer Name *</label>
+            <input type="text" x-model="extendForm.authorized_by_name" required placeholder="Officer Name"
+                   class="input-field w-full px-3 py-2 rounded-xl text-xs bg-slate-50 dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Officer Rank</label>
+            <input type="text" x-model="extendForm.authorized_by_rank" placeholder="e.g. Wg Cdr"
+                   class="input-field w-full px-3 py-2 rounded-xl text-xs bg-slate-50 dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60" />
+          </div>
+        </div>
+
+        <!-- Reason -->
+        <div>
+          <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">Reason for Extension *</label>
+          <textarea x-model="extendForm.reason" required rows="2" placeholder="Official duty extended, vehicle breakdown, flight reschedule, etc."
+                    class="input-field w-full px-3 py-2 rounded-xl text-xs bg-slate-50 dark:bg-[#071d35] border border-slate-300 dark:border-blue-800/60"></textarea>
+        </div>
+
+        <div class="flex justify-end gap-3 pt-3 border-t border-slate-100 dark:border-blue-900/40">
+          <button type="button" @click="closeModal()" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300">Cancel</button>
+          <button type="submit" :disabled="submitting"
+                  class="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-blue-600 to-blue-800 hover:from-blue-700 hover:to-blue-900 shadow-md">
+            Grant Extension
+          </button>
+        </div>
+      </form>
+    </template>
+  </div>
+</div>
+
+<!-- 6. Movement Journey Timeline Modal -->
+<div x-show="modal === 'movementTimeline'" x-cloak
+     class="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop"
+     @keydown.escape.window="closeModal()">
+  <div @click.self="closeModal()" class="absolute inset-0"></div>
+  <div class="relative bg-white dark:bg-[#071d35] rounded-2xl shadow-2xl w-full max-w-xl p-6
+              animate-slide-up border border-slate-200 dark:border-blue-900/40 max-h-[85vh] overflow-y-auto">
+    <div class="flex items-center justify-between mb-4 pb-3 border-b border-slate-100 dark:border-blue-900/40">
+      <div>
+        <h4 class="text-lg font-bold text-black dark:text-slate-100">Movement Journey Timeline</h4>
+        <p class="text-xs font-mono text-blue-600 dark:text-blue-400" x-text="timelineTarget?.movement_ref"></p>
+      </div>
+      <button @click="closeModal()" class="p-2 rounded-xl hover:bg-slate-100 text-slate-500">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <!-- Timeline List -->
+    <div class="relative pl-6 space-y-6 before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-200 dark:before:bg-blue-900/60">
+      <template x-for="(evt, idx) in timelineEvents" :key="evt.id">
+        <div class="relative group">
+          <div class="absolute -left-6 top-1 w-5 h-5 rounded-full border-2 border-white dark:border-[#071d35] flex items-center justify-center text-white"
+               :class="evt.event_type.includes('IN') ? 'bg-emerald-500' : (evt.event_type.includes('OUT') ? 'bg-amber-500' : 'bg-blue-500')">
+            <div class="w-1.5 h-1.5 rounded-full bg-white"></div>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-bold text-slate-900 dark:text-white" x-text="evt.event_type.replace('_', ' ')"></span>
+              <span class="px-2 py-0.2 rounded text-[10px] font-bold bg-slate-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300"
+                    x-text="'Base: ' + evt.camp_code"></span>
+            </div>
+            <p class="text-xs text-slate-600 dark:text-slate-400 mt-1" x-text="evt.remarks"></p>
+            <div class="flex items-center gap-2 text-[11px] text-slate-400 mt-1">
+              <span x-text="evt.event_time"></span>
+              <span>&bull;</span>
+              <span x-text="'Operator: ' + (evt.operator_name || evt.operator_username || 'System')"></span>
+            </div>
+          </div>
+        </div>
+      </template>
+      <div x-show="timelineEvents.length === 0" class="text-xs text-slate-400 py-4">
+        No event history logged yet.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
      ALPINE.JS APPLICATION LOGIC
 ══════════════════════════════════════════════════════════════ -->
 <script>
@@ -2693,6 +3971,51 @@ function varsApp() {
     lastRefreshed: <?= json_encode(date('d M Y, H:i:s')) ?>,
     users: <?= json_encode($allUsers, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
     locations: <?= json_encode($allLocations, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
+
+    // Inter-Camp Movements State
+    movements: <?= json_encode($initialMovements, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
+    pendingArrivals: <?= json_encode($initialPendingArrivals, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
+    accommodations: <?= json_encode($initialAccommodations, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
+    movementCounts: <?= json_encode($initialMovementCounts, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
+    auditLogs: <?= json_encode($initialAuditLogs, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
+    activeLocationsList: <?= json_encode($activeLocations, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
+
+    movementSubTab: 'all',
+    movementStatusFilter: 'all',
+    movementSearch: '',
+    movementForm: {
+      svs_no: '',
+      rank: '',
+      name: '',
+      nic_no: '',
+      origin_camp: '',
+      destination_camp: '',
+      purpose_of_visit: '',
+      authority_name: '',
+      authority_svs: '',
+      authority_rank: '',
+      authority_designation: '',
+      authority_ref: '',
+      expected_arrival: '',
+      expected_return: '',
+      remarks: ''
+    },
+    movementError: '',
+    activeTargetMovement: null,
+    activeTargetAccom: null,
+    actionForm: { remarks: '', billet: '' },
+    extendForm: { hours: 24, reason: '', authorized_by_name: '', authorized_by_svs: '', authorized_by_rank: '' },
+    timelineTarget: null,
+    timelineEvents: [],
+    inquiryFilters: { svs_no: '', name: '', movement_ref: '', status: '' },
+    inquiryResults: [],
+
+    get displayedMovements() {
+      if (this.movementSubTab === 'pending') {
+        return this.pendingArrivals || [];
+      }
+      return this.movements || [];
+    },
 
     // Modal state: null | 'add' | 'markout' | 'delete' | 'createUser' | 'resetPass' | 'editLocation'
     modal: null,
@@ -2742,6 +4065,10 @@ function varsApp() {
       setInterval(() => {
         if (this.activeTab === 'visitors' && !this.modal) {
           this.fetchVisitors(true);
+        } else if (this.activeTab === 'movements' && !this.modal) {
+          this.fetchMovements(true);
+        } else if (this.activeTab === 'accommodation' && !this.modal) {
+          this.fetchAccommodations(true);
         } else if (this.activeTab === 'reports' && !this.modal) {
           this.fetchReport(true);
         }
@@ -3299,6 +4626,334 @@ function varsApp() {
       } catch (e) {
         this.showError('Failed to update location.');
       }
+    },
+
+    // ── Inter-Camp Movement & Accommodation Methods ────────
+    async fetchMovements(silent = false) {
+      const params = new URLSearchParams();
+      params.set('ajax', 'movements');
+      if (this.movementStatusFilter && this.movementStatusFilter !== 'all') {
+        params.set('status', this.movementStatusFilter);
+      }
+      if (this.movementSearch) {
+        params.set('q', this.movementSearch);
+      }
+      if (this.isAdmin) {
+        params.set('loc', this.locFilter || 'ALL');
+      }
+
+      try {
+        const res = await fetch('dashboard.php?' + params.toString());
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.success) {
+          this.movements       = data.movements || [];
+          this.pendingArrivals = data.pending_arrivals || [];
+          this.movementCounts  = data.counts || this.movementCounts;
+        }
+      } catch (e) {
+        if (!silent) this.showToast('Failed to refresh movements.', false);
+      }
+    },
+
+    async fetchAccommodations(silent = false) {
+      const params = new URLSearchParams();
+      params.set('ajax', 'accommodations');
+      if (this.isAdmin) {
+        params.set('loc', this.locFilter || 'ALL');
+      }
+
+      try {
+        const res = await fetch('dashboard.php?' + params.toString());
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.success) {
+          this.accommodations = data.accommodations || [];
+          this.movementCounts = data.counts || this.movementCounts;
+        }
+      } catch (e) {
+        if (!silent) this.showToast('Failed to refresh accommodations.', false);
+      }
+    },
+
+    async fetchAuditLogs(silent = false) {
+      const params = new URLSearchParams();
+      params.set('ajax', 'audit_logs');
+      if (this.isAdmin) {
+        params.set('loc', this.locFilter || 'ALL');
+      }
+
+      try {
+        const res = await fetch('dashboard.php?' + params.toString());
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.success) {
+          this.auditLogs = data.audit_logs || [];
+        }
+      } catch (e) {
+        if (!silent) this.showToast('Failed to refresh audit trail.', false);
+      }
+    },
+
+    async checkPersonnelLookup() {
+      const svs = (this.movementForm.svs_no || '').trim();
+      if (svs.length < 3) return;
+      const payload = new FormData();
+      payload.append('_csrf', this.csrf());
+      payload.append('action', 'lookup_personnel');
+      payload.append('svs_no', svs);
+
+      try {
+        const res = await fetch('dashboard.php', { method: 'POST', body: payload });
+        const data = await res.json();
+        if (data.success && data.personnel) {
+          const p = data.personnel;
+          if (p.rank && !this.movementForm.rank) this.movementForm.rank = p.rank;
+          if (p.name && !this.movementForm.name) this.movementForm.name = p.name;
+          if (p.nic_no && !this.movementForm.nic_no) this.movementForm.nic_no = p.nic_no;
+          if (p.parent_camp && !this.isAdmin) this.movementForm.origin_camp = p.parent_camp;
+        }
+      } catch (e) {}
+    },
+
+    openAddMovementModal() {
+      const defLoc = (this.isAdmin && this.locFilter !== 'ALL') ? this.locFilter : this.currentLocation;
+      this.movementForm = {
+        svs_no: '',
+        rank: '',
+        name: '',
+        nic_no: '',
+        origin_camp: defLoc,
+        destination_camp: '',
+        purpose_of_visit: '',
+        authority_name: '',
+        authority_svs: '',
+        authority_rank: '',
+        authority_designation: '',
+        authority_ref: '',
+        expected_arrival: '',
+        expected_return: '',
+        remarks: ''
+      };
+      this.movementError = '';
+      this.submitting = false;
+      this.openModal('addMovement');
+    },
+
+    async submitAddMovement() {
+      this.movementError = '';
+      this.submitting = true;
+      const payload = new FormData();
+      payload.append('_csrf', this.csrf());
+      payload.append('action', 'register_origin_out');
+      for (const [k, v] of Object.entries(this.movementForm)) {
+        payload.append(k, v || '');
+      }
+
+      try {
+        const res = await fetch('dashboard.php', { method: 'POST', body: payload });
+        const data = await res.json();
+        this.submitting = false;
+        if (data.success) {
+          this.closeModal();
+          this.showToast(data.message, true);
+          await this.fetchMovements(true);
+        } else {
+          this.movementError = data.message || 'Failed to dispatch serviceman.';
+        }
+      } catch (e) {
+        this.submitting = false;
+        this.movementError = 'Server error processing movement.';
+      }
+    },
+
+    openDestInModal(m) {
+      this.activeTargetMovement = m;
+      this.actionForm = { remarks: '', billet: '' };
+      this.submitting = false;
+      this.openModal('destIn');
+    },
+
+    async submitDestIn() {
+      if (!this.activeTargetMovement) return;
+      this.submitting = true;
+      const payload = new FormData();
+      payload.append('_csrf', this.csrf());
+      payload.append('action', 'confirm_destination_in');
+      payload.append('movement_id', this.activeTargetMovement.id);
+      payload.append('remarks', this.actionForm.remarks || '');
+      payload.append('billet', this.actionForm.billet || '');
+
+      try {
+        const res = await fetch('dashboard.php', { method: 'POST', body: payload });
+        const data = await res.json();
+        this.submitting = false;
+        if (data.success) {
+          this.closeModal();
+          this.showToast(data.message, true);
+          await this.fetchMovements(true);
+          await this.fetchAccommodations(true);
+        } else {
+          this.showError(data.message || 'Failed to confirm arrival.');
+        }
+      } catch (e) {
+        this.submitting = false;
+        this.showError('Server error confirming destination arrival.');
+      }
+    },
+
+    openDestOutModal(m) {
+      this.activeTargetMovement = m;
+      this.actionForm = { remarks: '', billet: '' };
+      this.submitting = false;
+      this.openModal('destOut');
+    },
+
+    async submitDestOut() {
+      if (!this.activeTargetMovement) return;
+      this.submitting = true;
+      const payload = new FormData();
+      payload.append('_csrf', this.csrf());
+      payload.append('action', 'register_destination_out');
+      payload.append('movement_id', this.activeTargetMovement.id);
+      payload.append('remarks', this.actionForm.remarks || '');
+
+      try {
+        const res = await fetch('dashboard.php', { method: 'POST', body: payload });
+        const data = await res.json();
+        this.submitting = false;
+        if (data.success) {
+          this.closeModal();
+          this.showToast(data.message, true);
+          await this.fetchMovements(true);
+          await this.fetchAccommodations(true);
+        } else {
+          this.showError(data.message || 'Failed to register destination departure.');
+        }
+      } catch (e) {
+        this.submitting = false;
+        this.showError('Server error registering departure.');
+      }
+    },
+
+    openReturnInModal(m) {
+      this.activeTargetMovement = m;
+      this.actionForm = { remarks: '', billet: '' };
+      this.submitting = false;
+      this.openModal('returnIn');
+    },
+
+    async submitReturnIn() {
+      if (!this.activeTargetMovement) return;
+      this.submitting = true;
+      const payload = new FormData();
+      payload.append('_csrf', this.csrf());
+      payload.append('action', 'confirm_origin_return_in');
+      payload.append('movement_id', this.activeTargetMovement.id);
+      payload.append('remarks', this.actionForm.remarks || '');
+
+      try {
+        const res = await fetch('dashboard.php', { method: 'POST', body: payload });
+        const data = await res.json();
+        this.submitting = false;
+        if (data.success) {
+          this.closeModal();
+          this.showToast(data.message, true);
+          await this.fetchMovements(true);
+        } else {
+          this.showError(data.message || 'Failed to confirm return to base.');
+        }
+      } catch (e) {
+        this.submitting = false;
+        this.showError('Server error confirming return to base.');
+      }
+    },
+
+    openExtendAccomModal(a) {
+      this.activeTargetAccom = a;
+      this.extendForm = {
+        hours: 24,
+        reason: '',
+        authorized_by_name: '',
+        authorized_by_svs: '',
+        authorized_by_rank: ''
+      };
+      this.submitting = false;
+      this.openModal('extendAccom');
+    },
+
+    async submitExtendAccom() {
+      if (!this.activeTargetAccom) return;
+      this.submitting = true;
+      const payload = new FormData();
+      payload.append('_csrf', this.csrf());
+      payload.append('action', 'extend_accommodation');
+      payload.append('accommodation_id', this.activeTargetAccom.id);
+      payload.append('additional_hours', this.extendForm.hours);
+      payload.append('reason', this.extendForm.reason);
+      payload.append('authorized_by_name', this.extendForm.authorized_by_name);
+      payload.append('authorized_by_svs', this.extendForm.authorized_by_svs || '');
+      payload.append('authorized_by_rank', this.extendForm.authorized_by_rank || '');
+
+      try {
+        const res = await fetch('dashboard.php', { method: 'POST', body: payload });
+        const data = await res.json();
+        this.submitting = false;
+        if (data.success) {
+          this.closeModal();
+          this.showToast(data.message, true);
+          await this.fetchAccommodations(true);
+        } else {
+          this.showError(data.message || 'Failed to extend accommodation.');
+        }
+      } catch (e) {
+        this.submitting = false;
+        this.showError('Server error extending accommodation.');
+      }
+    },
+
+    async openMovementTimeline(m) {
+      this.timelineTarget = m;
+      this.timelineEvents = [];
+      this.openModal('movementTimeline');
+
+      const payload = new FormData();
+      payload.append('_csrf', this.csrf());
+      payload.append('action', 'get_movement_history');
+      payload.append('movement_id', m.id);
+
+      try {
+        const res = await fetch('dashboard.php', { method: 'POST', body: payload });
+        const data = await res.json();
+        if (data.success) {
+          this.timelineEvents = data.history || [];
+        }
+      } catch (e) {}
+    },
+
+    async executeInquiry() {
+      const params = new URLSearchParams();
+      params.set('ajax', 'movements');
+      if (this.inquiryFilters.svs_no) params.set('q', this.inquiryFilters.svs_no);
+      else if (this.inquiryFilters.name) params.set('q', this.inquiryFilters.name);
+      else if (this.inquiryFilters.movement_ref) params.set('q', this.inquiryFilters.movement_ref);
+      if (this.inquiryFilters.status) params.set('status', this.inquiryFilters.status);
+      params.set('loc', 'ALL');
+
+      try {
+        const res = await fetch('dashboard.php?' + params.toString());
+        const data = await res.json();
+        if (data.success) {
+          this.inquiryResults = data.movements || [];
+        }
+      } catch (e) {
+        this.showToast('Inquiry search failed.', false);
+      }
+    },
+
+    resetInquiry() {
+      this.inquiryFilters = { svs_no: '', name: '', movement_ref: '', status: '' };
+      this.inquiryResults = [];
     },
   };
 }
