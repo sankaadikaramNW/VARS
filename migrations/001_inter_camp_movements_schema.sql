@@ -192,3 +192,4 @@ INSERT IGNORE INTO system_settings (setting_key, setting_value, description) VAL
 
 -- 8. Expand role enum on users table safely
 ALTER TABLE users MODIFY COLUMN role ENUM('admin', 'camp_admin', 'user', 'oc_provost', 'stakeholder') NOT NULL DEFAULT 'user';
+

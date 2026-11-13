@@ -34,3 +34,4 @@ All notable changes to the VARS project are documented in this file.
 
 ### Fixed
 - Fixed MySQL 8.0+ reserved keyword collision on `rank` column by ensuring backtick escaping (`` `rank` ``) across all DDL and DML queries.
+

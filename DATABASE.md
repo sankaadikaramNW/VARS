@@ -167,3 +167,4 @@ Stores configurable system parameters (e.g. `DEFAULT_ACCOMMODATION_HOURS = 24`, 
 - `setting_value` TEXT NOT NULL
 - `description` VARCHAR(255) NOT NULL DEFAULT ''
 - `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+

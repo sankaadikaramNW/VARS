@@ -70,3 +70,4 @@ The **Visiting Airmen Record System (VARS)** is a secure, role-based PHP & MySQL
 
 ### 3. Launching
 Access `index.php` in your web browser. Sign in using your credentials and assigned camp location.
+
